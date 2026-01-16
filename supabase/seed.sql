@@ -1,99 +1,77 @@
 -- Sift Database Schema
--- Profiles table for user data
-CREATE TABLE IF NOT EXISTS profiles (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT UNIQUE NOT NULL,
+
+-- Profiles table linked to auth.users
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   nylas_grant_id TEXT,
   timezone TEXT DEFAULT 'UTC',
-  summary_time_utc TIME DEFAULT '08:00:00',
-  is_paid BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  summary_time TIME DEFAULT '08:00',
+  is_paid BOOLEAN DEFAULT FALSE
 );
 
--- Summaries table for email summaries
-CREATE TABLE IF NOT EXISTS summaries (
+-- Summaries table for AI outputs
+CREATE TABLE IF NOT EXISTS public.summaries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  heat_level TEXT NOT NULL CHECK (heat_level IN ('urgent', 'marketing', 'social', 'promotions', 'updates', 'other')),
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  content JSONB NOT NULL,
+  heat_vibe TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Create indexes for better query performance
-CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email);
-CREATE INDEX IF NOT EXISTS idx_profiles_nylas_grant_id ON profiles(nylas_grant_id);
-CREATE INDEX IF NOT EXISTS idx_summaries_user_id ON summaries(user_id);
-CREATE INDEX IF NOT EXISTS idx_summaries_created_at ON summaries(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_summaries_heat_level ON summaries(heat_level);
+-- Indexes for common access patterns
+CREATE INDEX IF NOT EXISTS idx_profiles_nylas_grant_id
+  ON public.profiles (nylas_grant_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_user_id
+  ON public.summaries (user_id);
+CREATE INDEX IF NOT EXISTS idx_summaries_created_at
+  ON public.summaries (created_at DESC);
+
+-- Trigger to auto-create profile on new auth user
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, timezone, summary_time, is_paid)
+  VALUES (NEW.id, 'UTC', '08:00', FALSE);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
 
 -- Enable Row Level Security (RLS)
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE summaries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.summaries ENABLE ROW LEVEL SECURITY;
 
--- RLS Policies for profiles table
--- Users can only view their own profile
-CREATE POLICY "Users can view their own profile"
-  ON profiles
+-- RLS Policies: authenticated users can only select/update their own data
+DROP POLICY IF EXISTS "Profiles: select own" ON public.profiles;
+CREATE POLICY "Profiles: select own"
+  ON public.profiles
   FOR SELECT
+  TO authenticated
   USING (auth.uid() = id);
 
--- Users can insert their own profile
-CREATE POLICY "Users can insert their own profile"
-  ON profiles
-  FOR INSERT
-  WITH CHECK (auth.uid() = id);
-
--- Users can update their own profile
-CREATE POLICY "Users can update their own profile"
-  ON profiles
+DROP POLICY IF EXISTS "Profiles: update own" ON public.profiles;
+CREATE POLICY "Profiles: update own"
+  ON public.profiles
   FOR UPDATE
+  TO authenticated
   USING (auth.uid() = id)
   WITH CHECK (auth.uid() = id);
 
--- RLS Policies for summaries table
--- Users can only view their own summaries
-CREATE POLICY "Users can view their own summaries"
-  ON summaries
+DROP POLICY IF EXISTS "Summaries: select own" ON public.summaries;
+CREATE POLICY "Summaries: select own"
+  ON public.summaries
   FOR SELECT
+  TO authenticated
   USING (auth.uid() = user_id);
 
--- Users can insert their own summaries
-CREATE POLICY "Users can insert their own summaries"
-  ON summaries
-  FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
-
--- Users can update their own summaries
-CREATE POLICY "Users can update their own summaries"
-  ON summaries
+DROP POLICY IF EXISTS "Summaries: update own" ON public.summaries;
+CREATE POLICY "Summaries: update own"
+  ON public.summaries
   FOR UPDATE
+  TO authenticated
   USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
-
--- Users can delete their own summaries
-CREATE POLICY "Users can delete their own summaries"
-  ON summaries
-  FOR DELETE
-  USING (auth.uid() = user_id);
-
--- Function to update updated_at timestamp
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = CURRENT_TIMESTAMP;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Triggers to automatically update updated_at
-CREATE TRIGGER update_profiles_updated_at
-  BEFORE UPDATE ON profiles
-  FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
-
-CREATE TRIGGER update_summaries_updated_at
-  BEFORE UPDATE ON summaries
-  FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
